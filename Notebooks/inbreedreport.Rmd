@@ -1,0 +1,153 @@
+---
+title: "Inbreeding & you (& Cayo)"
+author: "Seth Madlon-Kay"
+date: "October 6, 2015"
+output: pdf_document
+header-includes: \usepackage{amsmath}
+---
+
+#Introduction
+
+  How inbred are our monkeys? Karli has found a bunch of papers claiming "not very", but we could not for the life of us figure out on what basis they were doing so. So let's try to do this ourselves.
+  
+  First some definitions. Inbreeding in genetics is quantified using the imaginitively named coeficient of inbreeding. Formally, this is defined that as the probability that, within an organism, at a given (biallelic) locus, the two alleles are *identical by descent* (IBD). That is to say, both are copies of the same ancestral allele.
+  
+  Mathematically, this is instantiated as an extra parameter measuring "excess homozygosity", since IBD alleles are definitionally the same allele:
+$$ 
+  p(x) = 
+  \begin{cases}
+    (1-F) \theta^x (1-\theta)^{(2-x)} + F \theta^{x/2} (1-\theta)^{(1-x/2)} & \text{if } x \in \{0,2\} \\
+    (1-F) \theta (1-\theta) & \text{if } x = 1
+  \end{cases}
+$$
+where $x$ is the minor allele count, $\theta$ is the minor allele count, and $F$ is the inbreeding coeficient. Wikipedia "F statistics" for more on that. $F$ is calculated for each individual.
+
+  Traditionally, $F$ is calculated from a pedigree, though it can also be calculated from genetic information. It is pretty much a given that the pedigree will underestimate the values of $F$ because we do not have complete historical paternity information. When paternity information is missing, it is assumed that the sire is unrelated to everyone else, which on Cayo would be tantamount to airlifting fresh genetic material onto the island. So the goal here is to compare the inbreeding estimates from genetics to those from the peidgree.
+
+#Classical methods
+
+  We start by loading data and removing monkeys and loci that have more than 25% missing data, and removing loci that are too close to each other. This leaves us with 76 loci and 387 monkeys.
+  
+```{r,message=F,warning=F,echo=F}
+library(rstan)
+load("~/analysis/inbreed/stanfits")
+```
+```{r,message=FALSE,warning=FALSE,cache=T}
+source('~/Dropbox/monkeybris/rscript/setup.R')
+fv <- cullSNP(fv$X,fv$SNP,fv$MON,mthresh=0.25)
+X <- fv$X[,-SNPdelink(fv$SNP)]
+dim(X)
+```
+
+
+  Apparently, the conventional equation for calculating $F$ for an individual using genetic data is 
+  
+$$
+  F = 1 - \frac{\sum_l \textrm{I}(x_l=1)} { \sum_l \textrm{E}[\textrm{I}(x_l=1) | \theta_l]  }
+$$
+
+which is one minus the observed number of heterozygous loci over the number of heterozygous alleles observed if there were no inbreeding (and if the observed minor allele frequency is the true population MAF). Let's calculate this for our monkeys and examine the distribution:
+```{r,message=FALSE,warning=FALSE,fig.height=3,fig.width=5}
+p <- colMeans(X,na.rm = T)/2
+pht <- p*(1-p)*2
+eht <- vector()
+for (i in 1:nrow(X))
+  eht[i] <- sum(pht[!is.na(X[i,])])
+
+fg <- 1 - rowSums(X==1,na.rm = T)/eht
+
+qplot(x=fg,binwidth=0.075) + xlab("F")
+
+```
+
+So, a couple things jump out. 
+-First, because we are not actually doing proper probabilistic inference on this problem, we get lots of values below zero, which is not interpretable under the usual definition of the inbreeding coefficient. 
+-Second, the distribution seems incredibly, implausibly broad. Do we really believe a substantial portion of the population has an inbreeding coefficient of $>0.25$? Given how far the distribution goes below 0, which are meaningless values, I think it's more likely that this is just an extremely noisy measurement (at least with only 76 loci).
+-Third, the distribution is centered modestly but significantly above zero, consistent with there being some actual inbreeding on Cayo.
+
+  Let's compare these $F$s to those derived from the peidgree:
+```{r,message=FALSE,warning=FALSE,fig.height=3,fig.width=5}
+source('~/Dropbox/monkeybris/rscript/pedigree.preproc.batch.R')
+reped <- ped.matchnames(as.character(fv$MON$Animal.ID),pedigree$id)
+pedigree <- ped.replace(pedigree,reped$oldID,reped$ID)
+redped <- ped.trace(fv$MON$Animal.ID,pedigree)
+A <-with(redped,kinship2::kinship(id,dadid=sire,momid=dam))
+A <- A[rownames(A) %in% rownames(X),rownames(A) %in% rownames(X)]
+fp = diag(A)[match(rownames(X),rownames(A))] - 0.5
+
+qplot(x=fp,y=fg) + ylab("F (SNP)") + xlab("F (pedigree)")
+```
+
+Not super compelling correspondence. Also, the two measures are basically on different orders of magnitude.
+
+We can try to get a sense of whether this large spread in inbreeding values is "true" or just noise by comparing them to the F values we would expect under Hardy-Weinberg, i.e. F=0 for all monkeys.
+
+```{r,message=FALSE,warning=FALSE,fig.height=3,fig.width=5}
+nsim <- 500
+simout <- data.frame(mean=vector(length=nrow(X)),lb=NA,ub=NA)
+for (i in 1:nsim)
+{
+  Xsim <- array(dim = dim(X))
+  for (j in 1:ncol(X))
+    Xsim[,j] <- rbinom(nrow(X),1,pht[j])
+  
+  fgsim <- 1 - rowSums(Xsim)/sum(pht)
+  simout[i,] <- c(mean(fgsim),quantile(fgsim,probs=c(0.025,0.975)))
+}
+
+ggplot(reshape2::melt(simout),aes(x=value,fill=variable)) + geom_density(adjust=2) +
+  geom_vline(xintercept=mean(fg),color="red") +
+  geom_vline(xintercept=quantile(fg,0.025),color="green") +
+  geom_vline(xintercept=quantile(fg,0.975),color="blue") + xlab("F (SNP)")
+```
+
+Above is plotted the distribution of mean Fs and 2.5% and 97.5% quantiles of F under simulations from the HW equilibrium. The vertical lines indicate where our sample falls. As you can see, even when the true F is zero, you'd still expect a large range of F values. However, the average and upper quantile of Fs in our sample slightly higher than you would expect.
+
+#Newfangled Bayesian nonsense
+
+  It's hard for me to know what to make of these F values because they not computed using probabilstic inference and therefore it's hard to assess the uncertainties associated with the numbers. So, let's see what happens when we do proper probabalistic inference on this problem and infer $F$ using Bayesian methods! I used a package called STAN to convert the equation above into a proper model and fit it using MCMC sampling. The text of the model is shown in the appendix for those interested (probably none of you).
+  
+```{r,message=FALSE,warning=FALSE,fig.height=5,fig.width=4}
+plt <- stan_plot(fit,pars="f",point_est="mean",ci_level=0.5)
+plt$data$y[order(plt$data$mean)] <- 1:387
+plt <- plt + theme_minimal() + scale_y_discrete(labels="",breaks=c(),name="monkey") +
+  scale_x_continuous(limits=c(0,0.7),name="F (SNP)")
+plt
+```
+
+Here we have plotted the posteriors for the F values for all monkeys. The points represent the posterior means, the thick red lines the 50% CIs, and the thin lines 95% CIs. Again we see a lot of large values here, with maybe a quarter of the population having mean Fs above 0.2. However, we can also see that the F values are not at all well identified within animals, with extremely broad posteriors all around.
+
+  Can we do any better than this? The standard tool for this situation, where you have noisy estimates across a lot of subjects, is to move to a heirarchical model where you explicitly model the population-level distribution of the variable of interest (here, F) and use that to pool information across subjects. So let's try that here and see what happens!
+
+```{r,message=FALSE,warning=FALSE,fig.height=5,fig.width=4}
+plt <- stan_plot(fit5,pars="f",point_est="mean",ci_level=0.5)
+plt$data$y[order(plt$data$mean)] <- 1:387
+plt <- plt + theme_minimal() + scale_y_discrete(labels="",breaks=c(),name="monkey") +
+  scale_x_continuous(limits=c(0,0.7),name="F (SNP)")
+plt
+```
+
+Well those numbers seem much more reasonable! The model is basically inferring that the F values are strongly clustered around a population average value of 0.04ish, with modest variability that's on the same order of magnitude as the F values from the pedigree.
+
+  However, if we directly compare posterior means to the pedigree Fs...
+```{r,message=FALSE,warning=FALSE,fig.height=3,fig.width=5}
+qplot(y=summary(fit5,pars="f")$summary[,1],x=fp) + ylab("F (SNP) posterior mean") + xlab("F (pedigree)")
+```
+
+Welp. So near as I can tell, the pedigree and the SNPs fundamentally disagree regarding inbreeding. The practical implications of this I have not thought deeply (or at all) about. Geneticists?
+
+#Appendix
+
+Flat (non-heirarchical) estimation of F:
+
+```{r,echo=F}
+cat(readLines("~/code/inbreed/flipperbaby.stan"),sep="\n")
+```
+
+Hierarchical estimation of F using a normal-logistic prior:
+
+```{r,echo=F}
+cat(readLines("~/code/inbreed/flipperking_logit.stan"),sep="\n")
+```
+
+Side note: I initially used a hierarchical beta prior for the Fs, which had the advantage of an easily interpretable mean hyperparameter. However, I got extremely poor mixing on the "sample size" hyperparameter, possibly due to the odd geometry of the Beta prior at extreme means.
